@@ -28,7 +28,7 @@ from tradingagents.agents.utils.agent_utils import (
     resolve_instrument_identity,
 )
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.config import use_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_llm_client
@@ -64,9 +64,6 @@ class TradingAgentsGraph:
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
-
-        # Update the interface's config
-        set_config(self.config)
 
         # Create necessary directories
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
@@ -329,36 +326,37 @@ class TradingAgentsGraph:
         a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
         """
-        self.ticker = company_name
+        with use_config(self.config):
+            self.ticker = company_name
 
-        # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+            # Resolve any pending memory-log entries for this ticker before the pipeline runs.
+            self._resolve_pending_entries(company_name)
 
-        # Recompile with a checkpointer if the user opted in.
-        if self.config.get("checkpoint_enabled"):
-            self._checkpointer_ctx = get_checkpointer(
-                self.config["data_cache_dir"], company_name
-            )
-            saver = self._checkpointer_ctx.__enter__()
-            self.graph = self.workflow.compile(checkpointer=saver)
-
-            step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-            if step is not None:
-                logger.info(
-                    "Resuming from step %d for %s on %s", step, company_name, trade_date
+            # Recompile with a checkpointer if the user opted in.
+            if self.config.get("checkpoint_enabled"):
+                self._checkpointer_ctx = get_checkpointer(
+                    self.config["data_cache_dir"], company_name
                 )
-            else:
-                logger.info("Starting fresh for %s on %s", company_name, trade_date)
+                saver = self._checkpointer_ctx.__enter__()
+                self.graph = self.workflow.compile(checkpointer=saver)
 
-        try:
-            return self._run_graph(company_name, trade_date, asset_type=asset_type)
-        finally:
-            if self._checkpointer_ctx is not None:
-                self._checkpointer_ctx.__exit__(None, None, None)
-                self._checkpointer_ctx = None
-                self.graph = self.workflow.compile()
+                step = checkpoint_step(
+                    self.config["data_cache_dir"], company_name, str(trade_date)
+                )
+                if step is not None:
+                    logger.info(
+                        "Resuming from step %d for %s on %s", step, company_name, trade_date
+                    )
+                else:
+                    logger.info("Starting fresh for %s on %s", company_name, trade_date)
+
+            try:
+                return self._run_graph(company_name, trade_date, asset_type=asset_type)
+            finally:
+                if self._checkpointer_ctx is not None:
+                    self._checkpointer_ctx.__exit__(None, None, None)
+                    self._checkpointer_ctx = None
+                    self.graph = self.workflow.compile()
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
@@ -373,6 +371,7 @@ class TradingAgentsGraph:
             past_context=past_context,
             instrument_context=instrument_context,
         )
+        init_agent_state["risk_analysis_mode"] = self.config.get("risk_analysis_mode", "full")
         args = self.propagator.get_graph_args()
 
         # Inject thread_id so same ticker+date resumes, different date starts fresh.
@@ -402,11 +401,18 @@ class TradingAgentsGraph:
         # Log state to disk.
         self._log_state(trade_date, final_state)
 
+        final_decision = (
+            final_state.get("final_trade_decision")
+            or final_state.get("trader_investment_plan")
+            or final_state.get("investment_plan")
+            or ""
+        )
+
         # Store decision for deferred reflection on the next same-ticker run.
         self.memory_log.store_decision(
             ticker=company_name,
             trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
+            final_trade_decision=final_decision,
         )
 
         # Clear checkpoint on successful completion to avoid stale state.
@@ -415,7 +421,7 @@ class TradingAgentsGraph:
                 self.config["data_cache_dir"], company_name, str(trade_date)
             )
 
-        return final_state, self.process_signal(final_state["final_trade_decision"])
+        return final_state, self.process_signal(final_decision)
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
@@ -427,6 +433,8 @@ class TradingAgentsGraph:
             "news_report": final_state["news_report"],
             "fundamentals_report": final_state["fundamentals_report"],
             "specialist_findings": final_state.get("specialist_findings", {}),
+            "deterministic_facts": final_state.get("deterministic_facts", {}),
+            "manager_judgment": final_state.get("manager_judgment", {}),
             "investment_debate_state": {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],
@@ -443,6 +451,9 @@ class TradingAgentsGraph:
                 "judge_decision": final_state["investment_debate_state"][
                     "judge_decision"
                 ],
+                "manager_judgment": final_state["investment_debate_state"].get(
+                    "manager_judgment", {}
+                ),
             },
             "trader_investment_decision": final_state["trader_investment_plan"],
             "risk_debate_state": {

@@ -17,8 +17,9 @@ from tradingagents.agents.utils.structured import (
 )
 
 
-def create_trader(llm):
+def create_trader(llm, config=None):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
+    language_instruction = get_language_instruction(config)
 
     def trader_node(state, name):
         company_name = state["company_of_interest"]
@@ -32,7 +33,7 @@ def create_trader(llm):
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     "Anchor your reasoning in the analysts' reports and the research plan."
-                    + get_language_instruction()
+                    + language_instruction
                 ),
             },
             {

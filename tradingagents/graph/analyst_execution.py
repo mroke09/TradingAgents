@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
+from tradingagents.dataflows.config import get_config, run_with_config
+
 
 @dataclass(frozen=True)
 class AnalystNodeSpec:
@@ -101,10 +103,13 @@ def create_parallel_analysts_node(
 
     def parallel_analysts_node(state: dict[str, Any]) -> dict[str, Any]:
         reports: dict[str, Any] = {}
+        active_config = get_config()
         max_workers = min(plan.concurrency_limit, len(plan.specs))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
+                    run_with_config,
+                    active_config,
                     run_isolated_analyst,
                     spec,
                     analyst_nodes[spec.key],
@@ -175,15 +180,17 @@ def merge_parallel_result(target: dict[str, Any], result: dict[str, Any] | None)
     if not result:
         return
     for key, value in result.items():
-        if key == "specialist_findings":
+        if key in {"specialist_findings", "deterministic_facts"}:
             merged = dict(target.get("specialist_findings") or {})
+            if key == "deterministic_facts":
+                merged = dict(target.get("deterministic_facts") or {})
             if isinstance(value, dict):
                 for agent, findings in value.items():
                     if findings:
                         merged[agent] = findings
                     else:
                         merged.setdefault(agent, findings)
-            target["specialist_findings"] = merged
+            target[key] = merged
         else:
             target[key] = value
 

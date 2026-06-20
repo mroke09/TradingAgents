@@ -7,11 +7,12 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.structured import bind_structured
 
-from .researcher_argument import invoke_researcher_argument
+from .researcher_argument import invoke_researcher_argument, validate_argument_citations
 
 
 def create_bull_researcher(llm, config=None):
     structured_llm = bind_structured(llm, ResearcherArgument, "Bull Researcher")
+    language_instruction = get_language_instruction(config)
 
     def bull_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
@@ -61,6 +62,11 @@ Resources available:
 Structured specialist findings (primary evidence; cite finding ids in your evidence when applicable):
 {specialist_findings}
 
+Citation rules:
+- Every evidence item grounded in the specialist findings should include its exact finding_id.
+- Use source="other" only for synthesized cross-report reasoning that cannot cite one finding.
+- Do not invent finding ids; cite only ids shown in the structured specialist findings block.
+
 Fallback analyst reports:
 Market research report: {market_research_report}
 Social media sentiment report: {sentiment_report}
@@ -78,7 +84,7 @@ Use this information to deliver a compelling bull argument, refute the bear's co
                 "finding ids in your evidence when applicable):\n"
                 + specialist_findings
             )
-        prompt = prompt_body + get_language_instruction()
+        prompt = prompt_body + language_instruction
 
         argument_content, structured_argument = invoke_researcher_argument(
             structured_llm=structured_llm,
@@ -89,6 +95,10 @@ Use this information to deliver a compelling bull argument, refute the bear's co
         argument = f"Bull Analyst: {argument_content}"
         bull_arguments = list(investment_debate_state.get("bull_arguments", []))
         if structured_argument is not None:
+            structured_argument = validate_argument_citations(
+                structured_argument,
+                state.get("specialist_findings", {}),
+            )
             bull_arguments.append(structured_argument)
 
         new_investment_debate_state = {

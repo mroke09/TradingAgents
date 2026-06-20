@@ -49,7 +49,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def get_language_instruction() -> str:
+def get_language_instruction(config: Mapping[str, Any] | None = None) -> str:
     """Return a prompt instruction for the configured output language.
 
     Returns empty string when English (default), so no extra tokens are used.
@@ -58,8 +58,10 @@ def get_language_instruction() -> str:
     portfolio manager — so a non-English run produces a fully localized
     report rather than a mix of languages.
     """
-    from tradingagents.dataflows.config import get_config
-    lang = get_config().get("output_language", "English")
+    if config is None:
+        from tradingagents.dataflows.config import get_config
+        config = get_config()
+    lang = str((config or {}).get("output_language", "English"))
     if lang.strip().lower() == "english":
         return ""
     return f" Write your entire response in {lang}."
@@ -212,6 +214,5 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
 
 

@@ -89,16 +89,26 @@ class GraphSetup:
             self.deep_thinking_llm,
             self.config,
         )
-        trader_node = create_trader(self.quick_thinking_llm)
+        trader_node = create_trader(self.quick_thinking_llm, self.config)
 
         # Create risk analysis nodes
-        aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
-        neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
-        conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
-        portfolio_manager_node = create_portfolio_manager(self.deep_thinking_llm)
+        aggressive_analyst = create_aggressive_debator(
+            self.quick_thinking_llm,
+            self.config,
+        )
+        neutral_analyst = create_neutral_debator(self.quick_thinking_llm, self.config)
+        conservative_analyst = create_conservative_debator(
+            self.quick_thinking_llm,
+            self.config,
+        )
+        portfolio_manager_node = create_portfolio_manager(
+            self.deep_thinking_llm,
+            self.config,
+        )
 
         # Create workflow
         workflow = StateGraph(AgentState)
+        risk_analysis_mode = self.config.get("risk_analysis_mode", "full")
 
         analyst_nodes = {spec.key: analyst_factories[spec.key]() for spec in plan.specs}
 
@@ -127,6 +137,7 @@ class GraphSetup:
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node("Finalize Without Risk", finalize_without_risk)
 
         # Define edges
         if plan.uses_parallel_execution:
@@ -174,32 +185,46 @@ class GraphSetup:
             },
         )
         workflow.add_edge("Research Manager", "Trader")
-        workflow.add_edge("Trader", "Aggressive Analyst")
-        workflow.add_conditional_edges(
-            "Aggressive Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Conservative Analyst": "Conservative Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Conservative Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Neutral Analyst": "Neutral Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
-        workflow.add_conditional_edges(
-            "Neutral Analyst",
-            self.conditional_logic.should_continue_risk_analysis,
-            {
-                "Aggressive Analyst": "Aggressive Analyst",
-                "Portfolio Manager": "Portfolio Manager",
-            },
-        )
+        if risk_analysis_mode == "off":
+            workflow.add_edge("Trader", "Finalize Without Risk")
+            workflow.add_edge("Finalize Without Risk", END)
+        elif risk_analysis_mode == "portfolio_only":
+            workflow.add_edge("Trader", "Portfolio Manager")
+        else:
+            workflow.add_edge("Trader", "Aggressive Analyst")
+            workflow.add_conditional_edges(
+                "Aggressive Analyst",
+                self.conditional_logic.should_continue_risk_analysis,
+                {
+                    "Conservative Analyst": "Conservative Analyst",
+                    "Portfolio Manager": "Portfolio Manager",
+                },
+            )
+            workflow.add_conditional_edges(
+                "Conservative Analyst",
+                self.conditional_logic.should_continue_risk_analysis,
+                {
+                    "Neutral Analyst": "Neutral Analyst",
+                    "Portfolio Manager": "Portfolio Manager",
+                },
+            )
+            workflow.add_conditional_edges(
+                "Neutral Analyst",
+                self.conditional_logic.should_continue_risk_analysis,
+                {
+                    "Aggressive Analyst": "Aggressive Analyst",
+                    "Portfolio Manager": "Portfolio Manager",
+                },
+            )
 
         workflow.add_edge("Portfolio Manager", END)
 
         return workflow
+
+
+def finalize_without_risk(state: dict[str, Any]) -> dict[str, str]:
+    decision = state.get("trader_investment_plan") or state.get("investment_plan", "")
+    return {
+        "final_trade_decision": decision,
+        "risk_analysis_mode": "off",
+    }

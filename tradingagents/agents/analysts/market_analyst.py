@@ -1,8 +1,11 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.analysts.findings import (
-    bind_findings_extractor,
-    extract_specialist_findings,
+    extract_verified_facts_from_messages,
+    finalize_specialist_analysis_from_message,
+    specialist_final_tool_instruction,
+    submit_specialist_analysis,
+    update_deterministic_facts,
     update_specialist_findings,
 )
 from tradingagents.agents.skills import render_configured_skill_prompt
@@ -16,20 +19,16 @@ from tradingagents.agents.utils.agent_utils import (
 
 
 def create_market_analyst(llm, config=None):
-    findings_llm = bind_findings_extractor(llm, "Market Analyst")
-
-    def market_analyst_node(state):
-        current_date = state["trade_date"]
-        instrument_context = get_instrument_context_from_state(state)
-
-        tools = [
-            get_stock_data,
-            get_indicators,
-            get_verified_market_snapshot,
-        ]
-
-        default_system_message = (
-            """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
+    language_instruction = get_language_instruction(config)
+    tools = [
+        get_stock_data,
+        get_indicators,
+        get_verified_market_snapshot,
+    ]
+    llm_tools = tools + [submit_specialist_analysis]
+    tool_names = ", ".join([tool.name for tool in llm_tools])
+    default_system_message = (
+        """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
 - close_50_sma: 50 SMA: A medium-term trend indicator. Usage: Identify trend direction and serve as dynamic support/resistance. Tips: It lags price; combine with faster indicators for timely signals.
@@ -58,72 +57,89 @@ Volume-Based Indicators:
 Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
-            + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
-            + get_language_instruction()
-        )
+        + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+        + language_instruction
+        + specialist_final_tool_instruction("market")
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You are a helpful AI assistant, collaborating with other assistants."
+                " Use the provided tools to progress towards answering the question."
+                " If you are unable to fully answer, that's OK; another assistant with different tools"
+                " will help where you left off. Execute what you can to make progress."
+                " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
+                " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
+                " You have access to the following tools: {tool_names}.\n{system_message}"
+                "For your reference, the current date is {current_date}. {instrument_context}",
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    ).partial(tool_names=tool_names)
+    chain = prompt | llm.bind_tools(llm_tools)
+
+    def market_analyst_node(state):
+        current_date = state["trade_date"]
+        instrument_context = get_instrument_context_from_state(state)
+        ticker = state.get("company_of_interest", "")
+        asset_type = state.get("asset_type", "stock")
+
         skill_message = render_configured_skill_prompt(
             config=config,
             agent_id="market_analyst",
             context={
-                "ticker": state.get("company_of_interest", ""),
+                "ticker": ticker,
                 "trade_date": current_date,
                 "current_date": current_date,
-                "asset_type": state.get("asset_type", "stock"),
+                "asset_type": asset_type,
                 "instrument_context": instrument_context,
-                "tool_names": ", ".join([tool.name for tool in tools]),
+                "tool_names": tool_names,
             },
         )
         system_message = (
-            skill_message + get_language_instruction()
+            skill_message + language_instruction + specialist_final_tool_instruction("market")
             if skill_message
             else default_system_message
         )
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful AI assistant, collaborating with other assistants."
-                    " Use the provided tools to progress towards answering the question."
-                    " If you are unable to fully answer, that's OK; another assistant with different tools"
-                    " will help where you left off. Execute what you can to make progress."
-                    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
-                    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
-                    " You have access to the following tools: {tool_names}.\n{system_message}"
-                    "For your reference, the current date is {current_date}. {instrument_context}",
-                ),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
+        result = chain.invoke(
+            {
+                "messages": state["messages"],
+                "system_message": system_message,
+                "current_date": current_date,
+                "instrument_context": instrument_context,
+            }
         )
 
-        prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
-        prompt = prompt.partial(current_date=current_date)
-        prompt = prompt.partial(instrument_context=instrument_context)
-
-        chain = prompt | llm.bind_tools(tools)
-
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
+        deterministic_facts = extract_verified_facts_from_messages(
+            state.get("messages", []),
+            agent_key="market",
+            trade_date=current_date,
+        )
+        analysis = finalize_specialist_analysis_from_message(
+            result,
+            agent_key="market",
+            trade_date=current_date,
+            deterministic_facts=deterministic_facts,
+        )
+        if analysis is None:
+            return {
+                "messages": [result],
+                "market_report": "",
+            }
 
         update = {
-            "messages": [result],
-            "market_report": report,
+            "messages": [analysis.message],
+            "market_report": analysis.report,
         }
-        if report:
-            findings = extract_specialist_findings(
-                findings_llm,
-                agent_key="market",
-                report_text=report,
-                trade_date=current_date,
-                instrument_context=instrument_context,
+        if analysis.facts:
+            update["deterministic_facts"] = update_deterministic_facts(
+                state, "market", analysis.facts
             )
+        if analysis.report:
             update["specialist_findings"] = update_specialist_findings(
-                state, "market", findings
+                state, "market", analysis.findings
             )
         return update
 

@@ -46,6 +46,11 @@ class TestLanguageInstruction:
         assert "中文" in out
         assert "entire response" in out
 
+    def test_explicit_config_does_not_require_global_read(self):
+        out = get_language_instruction({"output_language": "中文"})
+        assert "中文" in out
+        assert "entire response" in out
+
 
 @pytest.mark.unit
 @pytest.mark.parametrize("rel", REPORT_AGENTS)
@@ -53,7 +58,7 @@ def test_report_agent_applies_language_instruction(rel):
     path = _AGENTS_DIR / rel
     assert path.exists(), f"missing agent module: {rel}"
     src = path.read_text(encoding="utf-8")
-    assert "get_language_instruction()" in src, (
+    assert "get_language_instruction(" in src, (
         f"{rel} does not apply get_language_instruction(); its output would "
         f"ignore the configured output_language (#740/#801)."
     )

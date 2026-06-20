@@ -15,6 +15,8 @@ from pydantic import ValidationError
 from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
 from tradingagents.agents.analysts.findings import (
     extract_specialist_findings,
+    extract_verified_facts_from_messages,
+    finalize_specialist_analysis_from_message,
     format_specialist_findings_for_prompt,
 )
 from tradingagents.agents.managers.research_manager import create_research_manager
@@ -28,6 +30,7 @@ from tradingagents.agents.schemas import (
     ResearcherArgument,
     SentimentBand,
     SentimentReport,
+    SpecialistAnalysisOutput,
     SpecialistFinding,
     SpecialistFindingsReport,
     TraderAction,
@@ -203,6 +206,119 @@ class TestSpecialistFindings:
         assert "market-1" in text
         assert "RSI = 58" in text
 
+    def test_final_tool_submission_produces_report_and_findings(self):
+        message = MagicMock()
+        message.content = ""
+        message.tool_calls = [
+            {
+                "name": "submit_specialist_analysis",
+                "args": {
+                    "markdown_report": "## Market Report\nTrend is constructive.",
+                    "findings": [
+                        {
+                            "id": "1",
+                            "agent": "market",
+                            "category": "trend",
+                            "claim": "Trend is constructive.",
+                            "evidence": [
+                                {
+                                    "source": "get_verified_market_snapshot",
+                                    "metric": "trend",
+                                    "value": "constructive",
+                                    "detail": "The submitted report says trend is constructive.",
+                                }
+                            ],
+                            "direction": "bullish",
+                            "confidence": "high",
+                            "importance": "high",
+                        }
+                    ],
+                },
+            }
+        ]
+
+        result = finalize_specialist_analysis_from_message(
+            message,
+            agent_key="market",
+            trade_date="2026-01-15",
+        )
+
+        assert result.report.startswith("## Market Report")
+        assert result.message.content == result.report
+        assert result.findings[0]["id"] == "market-1"
+        assert result.findings[0]["as_of_date"] == "2026-01-15"
+
+    def test_verified_market_snapshot_facts_are_attached_to_finding_evidence(self):
+        tool_message = MagicMock()
+        tool_message.name = "get_verified_market_snapshot"
+        tool_message.content = """## Verified market data snapshot for NVDA
+
+- Requested analysis date: 2026-01-15
+- Latest trading row used: 2026-01-14
+
+### Latest verified OHLCV row
+
+| Field | Value |
+|---|---:|
+| Open | 100.00 |
+| High | 105.00 |
+| Low | 99.00 |
+| Close | 104.00 |
+| Volume | 1200000 |
+
+### Verified technical indicators (latest row)
+
+| Indicator | Value |
+|---|---:|
+| rsi | 58.20 |
+"""
+        facts = extract_verified_facts_from_messages(
+            [tool_message],
+            agent_key="market",
+            trade_date="2026-01-15",
+        )
+        assert {fact["metric"] for fact in facts} >= {"Close", "rsi"}
+
+        message = MagicMock()
+        message.content = ""
+        message.tool_calls = [
+            {
+                "name": "submit_specialist_analysis",
+                "args": {
+                    "markdown_report": "Close was 104 and RSI was 58.20.",
+                    "findings": [
+                        {
+                            "id": "market-1",
+                            "agent": "market",
+                            "category": "momentum",
+                            "claim": "RSI is constructive.",
+                            "evidence": [
+                                {
+                                    "source": "get_verified_market_snapshot",
+                                    "metric": "rsi",
+                                    "value": "58.20",
+                                    "detail": "Verified snapshot reports RSI at 58.20.",
+                                }
+                            ],
+                            "direction": "bullish",
+                            "confidence": "high",
+                            "importance": "medium",
+                        }
+                    ],
+                },
+            }
+        ]
+
+        result = finalize_specialist_analysis_from_message(
+            message,
+            agent_key="market",
+            trade_date="2026-01-15",
+            deterministic_facts=facts,
+        )
+
+        assert result.facts
+        assert result.findings[0]["evidence"][0]["fact_id"] == "market-fact-rsi"
+
 
 @pytest.mark.unit
 class TestRenderResearcherArgument:
@@ -357,6 +473,8 @@ class TestResearchManagerAgent:
         assert "**Recommendation**: Overweight" in ip
         assert "**Rationale**: Bull case" in ip
         assert "**Strategic Actions**: Build position" in ip
+        assert result["manager_judgment"]["recommendation"] == "Overweight"
+        assert "manager_judgment" in result["investment_debate_state"]
 
     def test_prompt_uses_5_tier_rating_scale(self):
         """The RM prompt must list all five tiers so the schema enum matches user expectations."""
@@ -468,9 +586,22 @@ class TestResearcherAgents:
         assert debate["bull_arguments"][0]["thesis"].startswith("Strong revenue growth")
         assert debate["bull_arguments"][0]["evidence"][0]["source"] == "fundamentals"
         assert debate["bull_arguments"][0]["evidence"][0]["finding_id"] == "fundamentals-1"
+        assert debate["bull_arguments"][0]["evidence"][0]["citation_status"] == "valid"
         assert "Structured specialist findings" in captured["prompt"]
         assert "fundamentals-1" in captured["prompt"]
         assert "Bear Counterpoints" in captured["prompt"]
+
+    def test_bull_researcher_marks_invalid_citations_without_failing(self):
+        captured = {}
+        argument = _researcher_argument()
+        argument.evidence[0].finding_id = "fundamentals-missing"
+        bull = create_bull_researcher(_structured_researcher_llm(captured, argument))
+
+        debate = bull(_make_researcher_state())["investment_debate_state"]
+
+        evidence = debate["bull_arguments"][0]["evidence"][0]
+        assert evidence["citation_status"] == "invalid"
+        assert "not present" in evidence["citation_note"]
 
     def test_bear_researcher_stores_structured_argument_and_markdown_history(self):
         captured = {}
@@ -572,18 +703,16 @@ def _structured_sentiment_llm(
         )
     if findings is None:
         findings = SpecialistFindingsReport(findings=[])
+    analysis = SpecialistAnalysisOutput(
+        markdown_report=render_sentiment_report(report),
+        findings=findings.findings,
+    )
     sentiment_structured = MagicMock()
     sentiment_structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("prompt", prompt) or report
-    )
-    findings_structured = MagicMock()
-    findings_structured.invoke.side_effect = lambda prompt: (
-        captured.__setitem__("findings_prompt", prompt) or findings
+        captured.__setitem__("prompt", prompt) or analysis
     )
     llm = MagicMock()
-    llm.with_structured_output.side_effect = lambda schema: (
-        sentiment_structured if schema is SentimentReport else findings_structured
-    )
+    llm.with_structured_output.return_value = sentiment_structured
     return llm
 
 

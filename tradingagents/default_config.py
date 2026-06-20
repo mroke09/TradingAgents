@@ -15,6 +15,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_OUTPUT_LANGUAGE":      "output_language",
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
+    "TRADINGAGENTS_RISK_ANALYSIS_MODE":   "risk_analysis_mode",
     "TRADINGAGENTS_ANALYST_CONCURRENCY_LIMIT": "analyst_concurrency_limit",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
@@ -80,6 +81,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
+    # full: Trader -> 3 risk debaters -> Portfolio Manager (current behavior)
+    # portfolio_only: Trader -> Portfolio Manager
+    # off: Trader -> final decision without risk debate / Portfolio Manager
+    "risk_analysis_mode": "full",
     "max_recur_limit": 100,
     "analyst_concurrency_limit": 1,
     # Optional custom prompt skills by agent id. Example keys:

@@ -60,6 +60,13 @@ class TraderAction(str, Enum):
 class FindingEvidence(BaseModel):
     """Source-level evidence backing a specialist finding."""
 
+    fact_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional id of a deterministic fact extracted from a trusted tool output. "
+            "Use this for exact numeric claims when available."
+        ),
+    )
     source: str = Field(
         description=(
             "Where this evidence came from: tool name, data vendor, report section, "
@@ -119,6 +126,29 @@ class SpecialistFinding(BaseModel):
     )
 
 
+class VerifiedFact(BaseModel):
+    """Deterministic fact extracted from trusted tool output, not an LLM pass."""
+
+    id: str = Field(description="Stable fact id unique within the run.")
+    agent: Literal["market", "fundamentals", "news", "sentiment"] = Field(
+        description="Specialist analyst whose tool output produced this fact.",
+    )
+    source_tool: str = Field(description="Tool that produced the source output.")
+    metric: str = Field(description="Metric name, e.g. Close, rsi, revenue.")
+    value: str = Field(description="Observed value as text, preserving precision.")
+    unit: str | None = Field(default=None, description="Optional unit.")
+    date: str | None = Field(default=None, description="Evidence date when known.")
+    vendor: str | None = Field(default=None, description="Data vendor when known.")
+    freshness: str | None = Field(
+        default=None,
+        description="Freshness note, e.g. latest row on or before trade date.",
+    )
+    confidence: Literal["high"] = Field(
+        default="high",
+        description="Deterministic facts are high confidence by construction.",
+    )
+
+
 class SpecialistFindingsReport(BaseModel):
     """Structured findings extracted from a specialist analyst report."""
 
@@ -126,6 +156,26 @@ class SpecialistFindingsReport(BaseModel):
         description=(
             "Three to eight high-signal findings from the specialist report. "
             "Every finding must be grounded in evidence present in the report."
+        ),
+    )
+
+
+class SpecialistAnalysisOutput(BaseModel):
+    """One-shot specialist output: readable markdown plus structured findings."""
+
+    markdown_report: str = Field(
+        description=(
+            "Complete markdown report that downstream agents and users can read. "
+            "Include the same analysis detail the specialist would normally write, "
+            "including any requested markdown summary table."
+        ),
+    )
+    findings: list[SpecialistFinding] = Field(
+        default_factory=list,
+        description=(
+            "Three to eight high-signal findings grounded in the markdown report "
+            "and tool/data evidence. Each finding id must be unique within this "
+            "analyst and use the analyst prefix, e.g. market-1."
         ),
     )
 
@@ -144,6 +194,18 @@ class DebateEvidence(BaseModel):
             "Optional id of the specialist finding this debate evidence cites. "
             "Use this whenever the argument is grounded in a structured finding."
         ),
+    )
+    citation_status: Literal["valid", "invalid", "uncited", "synthesized"] | None = Field(
+        default=None,
+        description=(
+            "Set by validation after generation. valid means finding_id exists; "
+            "invalid means it was cited but missing; uncited/synthesized are allowed "
+            "when the evidence is not tied to a single specialist finding."
+        ),
+    )
+    citation_note: str | None = Field(
+        default=None,
+        description="Optional validation note for citation status.",
     )
     source: Literal["market", "fundamentals", "news", "sentiment", "other"] = Field(
         description=(
@@ -243,8 +305,9 @@ def _render_evidence(items: list[DebateEvidence]) -> list[str]:
     lines = []
     for item in items:
         finding = f" {item.finding_id}" if item.finding_id else ""
+        status = f" / {item.citation_status}" if item.citation_status else ""
         lines.append(
-            f"- [{item.source}{finding} / {item.importance}] "
+            f"- [{item.source}{finding} / {item.importance}{status}] "
             f"{item.claim}: {item.detail}"
         )
     return lines

@@ -21,8 +21,9 @@ from tradingagents.agents.utils.structured import (
 )
 
 
-def create_portfolio_manager(llm):
+def create_portfolio_manager(llm, config=None):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+    language_instruction = get_language_instruction(config)
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -61,7 +62,7 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts.{language_instruction}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,

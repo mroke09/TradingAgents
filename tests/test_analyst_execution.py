@@ -1,6 +1,8 @@
 import unittest
 from threading import Barrier
 
+import tradingagents.default_config as default_config
+from tradingagents.dataflows.config import get_config, use_config
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
@@ -114,6 +116,28 @@ class ParallelAnalystNodeTests(unittest.TestCase):
 
         self.assertEqual(result["market_report"], "saw tool result")
         self.assertEqual(calls, {"analyst": 2, "tool": 1})
+
+    def test_parallel_worker_receives_active_config(self):
+        plan = build_analyst_execution_plan(["market"], concurrency_limit=2)
+        local_config = dict(default_config.DEFAULT_CONFIG)
+        local_config["output_language"] = "中文"
+
+        def analyst(_state):
+            return {
+                "messages": [FakeMessage("final")],
+                "market_report": get_config()["output_language"],
+            }
+
+        node = create_parallel_analysts_node(
+            plan,
+            {"market": analyst},
+            {"market": FakeToolNode()},
+        )
+
+        with use_config(local_config):
+            result = node({"messages": [FakeMessage("start")]})
+
+        self.assertEqual(result["market_report"], "中文")
 
 
 class AnalystWallTimeTrackerTests(unittest.TestCase):

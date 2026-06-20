@@ -2,11 +2,12 @@
 
 import copy
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 import tradingagents.default_config as default_config
-from tradingagents.dataflows.config import get_config, set_config
+from tradingagents.dataflows.config import get_config, run_with_config, set_config, use_config
 
 
 @pytest.mark.unit
@@ -59,3 +60,32 @@ class DataflowsConfigIsolationTests(unittest.TestCase):
         fresh = get_config()
         self.assertEqual(fresh["tool_vendors"]["get_stock_data"], "alpha_vantage")
         self.assertEqual(fresh["tool_vendors"]["get_news"], "alpha_vantage")
+
+    def test_use_config_is_context_local(self):
+        local_config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        local_config["data_vendors"]["core_stock_apis"] = "alpha_vantage"
+
+        with use_config(local_config):
+            self.assertEqual(
+                get_config()["data_vendors"]["core_stock_apis"],
+                "alpha_vantage",
+            )
+
+        self.assertEqual(get_config()["data_vendors"]["core_stock_apis"], "yfinance")
+
+    def test_run_with_config_propagates_to_worker_thread(self):
+        local_config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        local_config["output_language"] = "中文"
+
+        def read_language():
+            return get_config()["output_language"]
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(
+                run_with_config,
+                local_config,
+                read_language,
+            ).result()
+
+        self.assertEqual(result, "中文")
+        self.assertEqual(get_config()["output_language"], "English")

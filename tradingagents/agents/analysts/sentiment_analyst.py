@@ -30,20 +30,15 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.analysts.findings import (
-    bind_findings_extractor,
-    extract_specialist_findings,
+    bind_specialist_analysis_output,
+    invoke_specialist_analysis_output,
     update_specialist_findings,
 )
-from tradingagents.agents.schemas import SentimentReport, render_sentiment_report
 from tradingagents.agents.skills import render_configured_skill_prompt
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_news,
-)
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
 )
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
@@ -61,8 +56,21 @@ def create_sentiment_analyst(llm, config=None):
     report via structured output (with a free-text fallback for providers
     that do not support it).
     """
-    structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
-    findings_llm = bind_findings_extractor(llm, "Sentiment Analyst")
+    structured_llm = bind_specialist_analysis_output(llm, "Sentiment Analyst")
+    language_instruction = get_language_instruction(config)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You are a helpful AI assistant, collaborating with other assistants."
+                " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
+                " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
+                "\n{system_message}\n"
+                "For your reference, the current date is {current_date}. {instrument_context}",
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    )
 
     def sentiment_analyst_node(state):
         ticker = state["company_of_interest"]
@@ -84,6 +92,7 @@ def create_sentiment_analyst(llm, config=None):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            language_instruction=language_instruction,
         )
         skill_message = render_configured_skill_prompt(
             config=config,
@@ -102,55 +111,35 @@ def create_sentiment_analyst(llm, config=None):
             },
         )
         system_message = (
-            skill_message + get_language_instruction()
+            skill_message + language_instruction
             if skill_message
             else default_system_message
         )
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a helpful AI assistant, collaborating with other assistants."
-                    " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
-                    " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
-                    "\n{system_message}\n"
-                    "For your reference, the current date is {current_date}. {instrument_context}",
-                ),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
-        )
-
-        prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(current_date=end_date)
-        prompt = prompt.partial(instrument_context=instrument_context)
-
         # Format the template into a concrete message list so the structured
         # and free-text paths receive the same input. No bind_tools — the
         # data is already in the prompt.
-        formatted_messages = prompt.format_messages(messages=state["messages"])
-
-        report_text = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            formatted_messages,
-            render_sentiment_report,
-            "Sentiment Analyst",
-        )
-
-        findings = extract_specialist_findings(
-            findings_llm,
-            agent_key="sentiment",
-            report_text=report_text,
-            trade_date=end_date,
+        formatted_messages = prompt.format_messages(
+            messages=state["messages"],
+            system_message=system_message,
+            current_date=end_date,
             instrument_context=instrument_context,
         )
 
+        analysis = invoke_specialist_analysis_output(
+            structured_llm,
+            llm,
+            formatted_messages,
+            agent_key="sentiment",
+            agent_name="Sentiment Analyst",
+            trade_date=end_date,
+        )
+
         return {
-            "messages": [AIMessage(content=report_text)],
-            "sentiment_report": report_text,
+            "messages": [AIMessage(content=analysis.report)],
+            "sentiment_report": analysis.report,
             "specialist_findings": update_specialist_findings(
-                state, "sentiment", findings
+                state, "sentiment", analysis.findings
             ),
         }
 
@@ -165,6 +154,7 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    language_instruction: str = "",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
@@ -212,14 +202,16 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 
 ## Output fields
 
-Fill the following fields:
+Write the report in the `markdown_report` field. In that markdown report, include:
 
 - **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when all sources are genuinely silent.
 - **overall_score**: A number from 0 (maximally bearish) to 10 (maximally bullish); 5 is neutral. Keep it consistent with overall_band.
 - **confidence**: low / medium / high, based on data quality and sample size.
 - **narrative**: Full source-by-source breakdown, divergences, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
 
-{get_language_instruction()}"""
+Also fill the `findings` field with 3-8 auditable sentiment findings. Every finding's `agent` must be `sentiment`, and every finding id must start with `sentiment-`.
+
+{language_instruction}"""
 
 
 # ---------------------------------------------------------------------------

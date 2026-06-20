@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.skills import render_configured_skill_prompt
@@ -10,14 +11,14 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext,
-)
+from tradingagents.agents.utils.structured import bind_structured
+
+logger = logging.getLogger(__name__)
 
 
 def create_research_manager(llm, config=None):
     structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
+    language_instruction = get_language_instruction(config)
 
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -71,18 +72,17 @@ You are a judge, not a transcript summarizer. Identify which evidence is stronge
             agent_id="research_manager",
             context=context,
         ) or default_prompt
-        prompt = prompt_body + get_language_instruction()
+        prompt = prompt_body + language_instruction
 
-        investment_plan = invoke_structured_or_freetext(
+        investment_plan, manager_judgment = _invoke_research_plan(
             structured_llm,
             llm,
             prompt,
-            render_research_plan,
-            "Research Manager",
         )
 
         new_investment_debate_state = {
             "judge_decision": investment_plan,
+            "manager_judgment": manager_judgment,
             "history": investment_debate_state.get("history", ""),
             "bear_history": investment_debate_state.get("bear_history", ""),
             "bull_history": investment_debate_state.get("bull_history", ""),
@@ -95,6 +95,40 @@ You are a judge, not a transcript summarizer. Identify which evidence is stronge
         return {
             "investment_debate_state": new_investment_debate_state,
             "investment_plan": investment_plan,
+            "manager_judgment": manager_judgment,
         }
 
     return research_manager_node
+
+
+def _invoke_research_plan(
+    structured_llm,
+    llm,
+    prompt: str,
+) -> tuple[str, dict]:
+    if structured_llm is not None:
+        try:
+            result = structured_llm.invoke(prompt)
+            plan = result if isinstance(result, ResearchPlan) else ResearchPlan.model_validate(result)
+            return render_research_plan(plan), _manager_judgment(plan)
+        except Exception as exc:
+            logger.warning(
+                "Research Manager: structured-output invocation failed (%s); retrying once as free text",
+                exc,
+            )
+    response = llm.invoke(prompt)
+    return response.content, {}
+
+
+def _manager_judgment(plan: ResearchPlan) -> dict:
+    return {
+        "recommendation": plan.recommendation.value,
+        "winningSide": plan.winning_side,
+        "keyDisagreement": plan.key_disagreement,
+        "strongestBullEvidence": list(plan.strongest_bull_evidence or []),
+        "strongestBearEvidence": list(plan.strongest_bear_evidence or []),
+        "unresolvedQuestions": list(plan.unresolved_questions or []),
+        "managerConfidence": plan.confidence,
+        "rationale": plan.rationale,
+        "strategicActions": plan.strategic_actions,
+    }
