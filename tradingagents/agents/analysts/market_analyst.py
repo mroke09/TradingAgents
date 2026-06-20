@@ -1,5 +1,11 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.analysts.findings import (
+    bind_findings_extractor,
+    extract_specialist_findings,
+    update_specialist_findings,
+)
+from tradingagents.agents.skills import render_configured_skill_prompt
 from tradingagents.agents.utils.agent_utils import (
     get_indicators,
     get_instrument_context_from_state,
@@ -9,7 +15,8 @@ from tradingagents.agents.utils.agent_utils import (
 )
 
 
-def create_market_analyst(llm):
+def create_market_analyst(llm, config=None):
+    findings_llm = bind_findings_extractor(llm, "Market Analyst")
 
     def market_analyst_node(state):
         current_date = state["trade_date"]
@@ -21,7 +28,7 @@ def create_market_analyst(llm):
             get_verified_market_snapshot,
         ]
 
-        system_message = (
+        default_system_message = (
             """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
@@ -53,6 +60,23 @@ Before writing the final report, call get_verified_market_snapshot for this tick
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
+        )
+        skill_message = render_configured_skill_prompt(
+            config=config,
+            agent_id="market_analyst",
+            context={
+                "ticker": state.get("company_of_interest", ""),
+                "trade_date": current_date,
+                "current_date": current_date,
+                "asset_type": state.get("asset_type", "stock"),
+                "instrument_context": instrument_context,
+                "tool_names": ", ".join([tool.name for tool in tools]),
+            },
+        )
+        system_message = (
+            skill_message + get_language_instruction()
+            if skill_message
+            else default_system_message
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -86,9 +110,21 @@ Write a very detailed and nuanced report of the trends you observe. Provide spec
         if len(result.tool_calls) == 0:
             report = result.content
 
-        return {
+        update = {
             "messages": [result],
             "market_report": report,
         }
+        if report:
+            findings = extract_specialist_findings(
+                findings_llm,
+                agent_key="market",
+                report_text=report,
+                trade_date=current_date,
+                instrument_context=instrument_context,
+            )
+            update["specialist_findings"] = update_specialist_findings(
+                state, "market", findings
+            )
+        return update
 
     return market_analyst_node

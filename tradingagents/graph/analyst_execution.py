@@ -1,6 +1,8 @@
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from time import monotonic
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,10 @@ class AnalystNodeSpec:
 class AnalystExecutionPlan:
     specs: list[AnalystNodeSpec]
     concurrency_limit: int
+
+    @property
+    def uses_parallel_execution(self) -> bool:
+        return self.concurrency_limit > 1 and len(self.specs) > 1
 
 
 ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
@@ -76,6 +82,125 @@ def build_analyst_execution_plan(
 
 def get_initial_analyst_node(plan: AnalystExecutionPlan) -> str:
     return plan.specs[0].agent_node
+
+
+def create_parallel_analysts_node(
+    plan: AnalystExecutionPlan,
+    analyst_nodes: dict[str, Callable[[dict[str, Any]], dict[str, Any]]],
+    tool_nodes: dict[str, Any],
+    *,
+    max_iterations: int = 50,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Create a graph node that runs selected analysts concurrently.
+
+    Each analyst gets an isolated copy of the incoming state. This keeps
+    tool-calling transcripts separate: ToolNode reads the last AI message on the
+    local ``messages`` list, so sharing that list across concurrent analysts can
+    route one analyst's tool call to another analyst's tool node.
+    """
+
+    def parallel_analysts_node(state: dict[str, Any]) -> dict[str, Any]:
+        reports: dict[str, Any] = {}
+        max_workers = min(plan.concurrency_limit, len(plan.specs))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    run_isolated_analyst,
+                    spec,
+                    analyst_nodes[spec.key],
+                    tool_nodes[spec.key],
+                    state,
+                    max_iterations=max_iterations,
+                ): spec
+                for spec in plan.specs
+            }
+            for future in as_completed(futures):
+                merge_parallel_result(reports, future.result())
+        return reports
+
+    return parallel_analysts_node
+
+
+def run_isolated_analyst(
+    spec: AnalystNodeSpec,
+    analyst_node: Callable[[dict[str, Any]], dict[str, Any]],
+    tool_node: Any,
+    state: dict[str, Any],
+    *,
+    max_iterations: int = 50,
+) -> dict[str, Any]:
+    """Run one analyst and its tool loop against an isolated state copy."""
+
+    local_state = copy_analyst_state(state)
+    for _ in range(max_iterations):
+        analyst_result = analyst_node(local_state)
+        merge_local_result(local_state, analyst_result)
+
+        last_message = last_local_message(analyst_result, local_state)
+        if has_tool_calls(last_message):
+            tool_result = tool_node.invoke(local_state)
+            merge_local_result(local_state, tool_result)
+            continue
+
+        result = {spec.report_key: local_state.get(spec.report_key, "")}
+        if "specialist_findings" in local_state:
+            result["specialist_findings"] = local_state["specialist_findings"]
+        return result
+
+    raise RuntimeError(
+        f"{spec.agent_node} exceeded {max_iterations} isolated tool iterations"
+    )
+
+
+def copy_analyst_state(state: dict[str, Any]) -> dict[str, Any]:
+    local_state = dict(state)
+    local_state["messages"] = list(state.get("messages", []))
+    return local_state
+
+
+def merge_local_result(
+    local_state: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> None:
+    if not result:
+        return
+    for key, value in result.items():
+        if key == "messages":
+            local_state["messages"] = list(local_state.get("messages", [])) + list(value)
+        else:
+            local_state[key] = value
+
+
+def merge_parallel_result(target: dict[str, Any], result: dict[str, Any] | None) -> None:
+    if not result:
+        return
+    for key, value in result.items():
+        if key == "specialist_findings":
+            merged = dict(target.get("specialist_findings") or {})
+            if isinstance(value, dict):
+                for agent, findings in value.items():
+                    if findings:
+                        merged[agent] = findings
+                    else:
+                        merged.setdefault(agent, findings)
+            target["specialist_findings"] = merged
+        else:
+            target[key] = value
+
+
+def last_local_message(
+    result: dict[str, Any] | None,
+    local_state: dict[str, Any],
+) -> Any:
+    result_messages = (result or {}).get("messages") or []
+    if result_messages:
+        return result_messages[-1]
+    messages = local_state.get("messages") or []
+    return messages[-1] if messages else None
+
+
+def has_tool_calls(message: Any) -> bool:
+    return bool(getattr(message, "tool_calls", None))
 
 
 class AnalystWallTimeTracker:

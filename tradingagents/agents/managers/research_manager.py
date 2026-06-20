@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
+from tradingagents.agents.skills import render_configured_skill_prompt
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -13,7 +16,7 @@ from tradingagents.agents.utils.structured import (
 )
 
 
-def create_research_manager(llm):
+def create_research_manager(llm, config=None):
     structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
 
     def research_manager_node(state) -> dict:
@@ -21,8 +24,23 @@ def create_research_manager(llm):
         history = state["investment_debate_state"].get("history", "")
 
         investment_debate_state = state["investment_debate_state"]
-
-        prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
+        structured_arguments = json.dumps(
+            {
+                "bull_arguments": investment_debate_state.get("bull_arguments", []),
+                "bear_arguments": investment_debate_state.get("bear_arguments", []),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        context = {
+            "instrument_context": instrument_context,
+            "ticker": state.get("company_of_interest", ""),
+            "trade_date": state.get("trade_date", ""),
+            "asset_type": state.get("asset_type", "stock"),
+            "structured_arguments": structured_arguments,
+            "history": history,
+        }
+        default_prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
 
 {instrument_context}
 
@@ -39,8 +57,21 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 
 ---
 
+You are a judge, not a transcript summarizer. Identify which evidence is strongest, which side carried the debate, what the real disagreement is, and what remains unresolved. Prefer structured argument evidence with specialist finding ids when available.
+
+**Structured Bull/Bear Arguments:**
+{structured_arguments}
+
+---
+
 **Debate History:**
-{history}""" + get_language_instruction()
+{history}"""
+        prompt_body = render_configured_skill_prompt(
+            config=config,
+            agent_id="research_manager",
+            context=context,
+        ) or default_prompt
+        prompt = prompt_body + get_language_instruction()
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,
@@ -55,6 +86,8 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
             "history": investment_debate_state.get("history", ""),
             "bear_history": investment_debate_state.get("bear_history", ""),
             "bull_history": investment_debate_state.get("bull_history", ""),
+            "bull_arguments": investment_debate_state.get("bull_arguments", []),
+            "bear_arguments": investment_debate_state.get("bear_arguments", []),
             "current_response": investment_plan,
             "count": investment_debate_state["count"],
         }

@@ -29,7 +29,13 @@ from datetime import datetime, timedelta
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.analysts.findings import (
+    bind_findings_extractor,
+    extract_specialist_findings,
+    update_specialist_findings,
+)
 from tradingagents.agents.schemas import SentimentReport, render_sentiment_report
+from tradingagents.agents.skills import render_configured_skill_prompt
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -47,7 +53,7 @@ def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
-def create_sentiment_analyst(llm):
+def create_sentiment_analyst(llm, config=None):
     """Create a sentiment analyst node for the trading graph.
 
     Pre-fetches news + StockTwits + Reddit data, injects them into the
@@ -56,6 +62,7 @@ def create_sentiment_analyst(llm):
     that do not support it).
     """
     structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
+    findings_llm = bind_findings_extractor(llm, "Sentiment Analyst")
 
     def sentiment_analyst_node(state):
         ticker = state["company_of_interest"]
@@ -70,13 +77,34 @@ def create_sentiment_analyst(llm):
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
         reddit_block = fetch_reddit_posts(ticker)
 
-        system_message = _build_system_message(
+        default_system_message = _build_system_message(
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+        )
+        skill_message = render_configured_skill_prompt(
+            config=config,
+            agent_id="sentiment_analyst",
+            context={
+                "ticker": ticker,
+                "trade_date": end_date,
+                "current_date": end_date,
+                "start_date": start_date,
+                "end_date": end_date,
+                "asset_type": state.get("asset_type", "stock"),
+                "instrument_context": instrument_context,
+                "news_block": news_block,
+                "stocktwits_block": stocktwits_block,
+                "reddit_block": reddit_block,
+            },
+        )
+        system_message = (
+            skill_message + get_language_instruction()
+            if skill_message
+            else default_system_message
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -110,9 +138,20 @@ def create_sentiment_analyst(llm):
             "Sentiment Analyst",
         )
 
+        findings = extract_specialist_findings(
+            findings_llm,
+            agent_key="sentiment",
+            report_text=report_text,
+            trade_date=end_date,
+            instrument_context=instrument_context,
+        )
+
         return {
             "messages": [AIMessage(content=report_text)],
             "sentiment_report": report_text,
+            "specialist_findings": update_specialist_findings(
+                state, "sentiment", findings
+            ),
         }
 
     return sentiment_analyst_node
@@ -186,7 +225,7 @@ Fill the following fields:
 # ---------------------------------------------------------------------------
 # Backwards-compatibility shim
 # ---------------------------------------------------------------------------
-def create_social_media_analyst(llm):
+def create_social_media_analyst(llm, config=None):
     """Deprecated alias for :func:`create_sentiment_analyst`.
 
     Kept so existing code that imports ``create_social_media_analyst``
@@ -202,4 +241,4 @@ def create_social_media_analyst(llm):
         DeprecationWarning,
         stacklevel=2,
     )
-    return create_sentiment_analyst(llm)
+    return create_sentiment_analyst(llm, config)

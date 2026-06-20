@@ -13,6 +13,12 @@ class InvestDebateState(TypedDict):
         str, "Bearish Conversation history"
     ]  # Bullish Conversation history
     history: Annotated[str, "Conversation history"]  # Conversation history
+    bull_arguments: Annotated[
+        list[dict], "Structured bull researcher arguments by debate turn"
+    ]
+    bear_arguments: Annotated[
+        list[dict], "Structured bear researcher arguments by debate turn"
+    ]
     current_response: Annotated[str, "Latest response"]  # Last response
     judge_decision: Annotated[str, "Final judge decision"]  # Last response
     count: Annotated[int, "Length of the current conversation"]  # Conversation length
@@ -59,6 +65,9 @@ class AgentState(MessagesState):
         str, "Report from the News Researcher of current world affairs"
     ]
     fundamentals_report: Annotated[str, "Report from the Fundamentals Researcher"]
+    specialist_findings: Annotated[
+        dict[str, list[dict]], "Structured findings written by specialist analysts"
+    ]
 
     # researcher team discussion step
     investment_debate_state: Annotated[

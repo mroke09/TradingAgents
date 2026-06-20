@@ -53,6 +53,204 @@ class TraderAction(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Specialist Findings
+# ---------------------------------------------------------------------------
+
+
+class FindingEvidence(BaseModel):
+    """Source-level evidence backing a specialist finding."""
+
+    source: str = Field(
+        description=(
+            "Where this evidence came from: tool name, data vendor, report section, "
+            "news source, or pre-fetched data block."
+        ),
+    )
+    metric: str | None = Field(
+        default=None,
+        description="Optional metric or named signal, e.g. RSI, revenue growth, CPI.",
+    )
+    value: str | None = Field(
+        default=None,
+        description="Optional observed value as text, preserving units when available.",
+    )
+    date: str | None = Field(
+        default=None,
+        description="Optional date associated with the evidence, YYYY-MM-DD when known.",
+    )
+    detail: str = Field(
+        description="Short explanation of how this evidence supports the finding.",
+    )
+
+
+class SpecialistFinding(BaseModel):
+    """A structured factual finding written by one specialist analyst."""
+
+    id: str = Field(
+        description=(
+            "Stable short id unique within this run and analyst, such as "
+            "'market-1' or 'fundamentals-margin-1'."
+        ),
+    )
+    agent: Literal["market", "fundamentals", "news", "sentiment"] = Field(
+        description="The specialist analyst that produced this finding.",
+    )
+    category: str = Field(
+        description="Finding category, e.g. trend, valuation, margins, catalyst, sentiment.",
+    )
+    claim: str = Field(
+        description="One concise factual claim extracted from the specialist report.",
+    )
+    evidence: list[FindingEvidence] = Field(
+        description="Evidence items that make the claim auditable.",
+    )
+    direction: Literal["bullish", "bearish", "neutral", "mixed"] = Field(
+        description="Directional implication for the instrument.",
+    )
+    confidence: Literal["low", "medium", "high"] = Field(
+        description="Confidence based on data quality and consistency.",
+    )
+    importance: Literal["low", "medium", "high"] = Field(
+        description="How important this finding is to the investment debate.",
+    )
+    as_of_date: str | None = Field(
+        default=None,
+        description="Analysis date or evidence date, YYYY-MM-DD when known.",
+    )
+
+
+class SpecialistFindingsReport(BaseModel):
+    """Structured findings extracted from a specialist analyst report."""
+
+    findings: list[SpecialistFinding] = Field(
+        description=(
+            "Three to eight high-signal findings from the specialist report. "
+            "Every finding must be grounded in evidence present in the report."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bull / Bear Researchers
+# ---------------------------------------------------------------------------
+
+
+class DebateEvidence(BaseModel):
+    """One evidence item cited by a bull or bear researcher."""
+
+    finding_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional id of the specialist finding this debate evidence cites. "
+            "Use this whenever the argument is grounded in a structured finding."
+        ),
+    )
+    source: Literal["market", "fundamentals", "news", "sentiment", "other"] = Field(
+        description=(
+            "The analyst report that supports this evidence item. Use 'other' "
+            "only when the evidence is synthesized across reports or comes from "
+            "the debate history rather than one named report."
+        ),
+    )
+    claim: str = Field(
+        description="Concise evidence claim, written as one specific point.",
+    )
+    detail: str = Field(
+        description=(
+            "Supporting detail anchored in the provided analyst reports. Do not "
+            "invent figures that are not present in the context."
+        ),
+    )
+    importance: Literal["low", "medium", "high"] = Field(
+        description="How important this evidence item is to the side's thesis.",
+    )
+
+
+class ResearcherArgument(BaseModel):
+    """Structured bull or bear argument produced during the investment debate."""
+
+    thesis: str = Field(
+        description=(
+            "The side's central investment thesis for this debate turn. One or "
+            "two sentences, decisive and evidence-grounded."
+        ),
+    )
+    key_points: list[str] = Field(
+        description=(
+            "Three to six concise supporting points. Each point should add a "
+            "distinct reason, not repeat the thesis."
+        ),
+    )
+    evidence: list[DebateEvidence] = Field(
+        description=(
+            "Specific evidence items from market, fundamentals, news, or "
+            "sentiment reports. Prefer concrete report-backed claims over "
+            "generic statements."
+        ),
+    )
+    rebuttal: str = Field(
+        description=(
+            "Direct response to the opposing analyst's last argument. If there "
+            "is no prior opposing argument, explain the most important concern "
+            "this side anticipates."
+        ),
+    )
+    assumptions: list[str] = Field(
+        description=(
+            "Key assumptions that must hold for the thesis to work. Keep these "
+            "plain and auditable."
+        ),
+    )
+    confidence: Literal["low", "medium", "high"] = Field(
+        description=(
+            "Confidence in this side's argument based on the strength and "
+            "consistency of the provided evidence."
+        ),
+    )
+
+
+def render_researcher_argument(argument: ResearcherArgument) -> str:
+    """Render a structured researcher argument to debate-compatible markdown."""
+
+    parts = [
+        f"**Thesis**: {argument.thesis}",
+        "",
+        "**Key Points**:",
+        *_render_bullets(argument.key_points),
+        "",
+        "**Evidence**:",
+        *_render_evidence(argument.evidence),
+        "",
+        f"**Rebuttal**: {argument.rebuttal}",
+        "",
+        "**Assumptions**:",
+        *_render_bullets(argument.assumptions),
+        "",
+        f"**Confidence**: {argument.confidence.capitalize()}",
+    ]
+    return "\n".join(parts)
+
+
+def _render_bullets(items: list[str]) -> list[str]:
+    if not items:
+        return ["- Not specified."]
+    return [f"- {item}" for item in items]
+
+
+def _render_evidence(items: list[DebateEvidence]) -> list[str]:
+    if not items:
+        return ["- No specific evidence cited."]
+    lines = []
+    for item in items:
+        finding = f" {item.finding_id}" if item.finding_id else ""
+        lines.append(
+            f"- [{item.source}{finding} / {item.importance}] "
+            f"{item.claim}: {item.detail}"
+        )
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Research Manager
 # ---------------------------------------------------------------------------
 
@@ -87,17 +285,69 @@ class ResearchPlan(BaseModel):
             "including position sizing guidance consistent with the rating."
         ),
     )
+    winning_side: Literal["bull", "bear", "balanced"] | None = Field(
+        default=None,
+        description=(
+            "Which side carried the debate: bull, bear, or balanced. Use balanced "
+            "only when neither side has clearly stronger evidence."
+        ),
+    )
+    key_disagreement: str | None = Field(
+        default=None,
+        description=(
+            "The one or two core variables the bull and bear cases actually disagree on."
+        ),
+    )
+    strongest_bull_evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Most important bull evidence, preferably citing specialist finding ids."
+        ),
+    )
+    strongest_bear_evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Most important bear evidence, preferably citing specialist finding ids."
+        ),
+    )
+    unresolved_questions: list[str] = Field(
+        default_factory=list,
+        description="Questions or data points that would most improve the decision.",
+    )
+    confidence: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description="Confidence in the manager's judgment after weighing both sides.",
+    )
 
 
 def render_research_plan(plan: ResearchPlan) -> str:
     """Render a ResearchPlan to markdown for storage and the trader's prompt context."""
-    return "\n".join([
+    parts = [
         f"**Recommendation**: {plan.recommendation.value}",
         "",
         f"**Rationale**: {plan.rationale}",
         "",
         f"**Strategic Actions**: {plan.strategic_actions}",
-    ])
+    ]
+    if plan.winning_side:
+        parts.extend(["", f"**Winning Side**: {plan.winning_side}"])
+    if plan.key_disagreement:
+        parts.extend(["", f"**Key Disagreement**: {plan.key_disagreement}"])
+    if plan.strongest_bull_evidence:
+        parts.extend(["", "**Strongest Bull Evidence**:", *[
+            f"- {item}" for item in plan.strongest_bull_evidence
+        ]])
+    if plan.strongest_bear_evidence:
+        parts.extend(["", "**Strongest Bear Evidence**:", *[
+            f"- {item}" for item in plan.strongest_bear_evidence
+        ]])
+    if plan.unresolved_questions:
+        parts.extend(["", "**Unresolved Questions**:", *[
+            f"- {item}" for item in plan.unresolved_questions
+        ]])
+    if plan.confidence:
+        parts.extend(["", f"**Manager Confidence**: {plan.confidence.capitalize()}"])
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

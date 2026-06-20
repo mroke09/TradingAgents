@@ -1,8 +1,10 @@
 import unittest
+from threading import Barrier
 
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
+    create_parallel_analysts_node,
     get_initial_analyst_node,
     sync_analyst_tracker_from_chunk,
 )
@@ -34,6 +36,17 @@ class AnalystExecutionPlanTests(unittest.TestCase):
             "Fundamentals Analyst",
         )
 
+    def test_parallel_execution_requires_multiple_analysts_and_workers(self):
+        self.assertFalse(
+            build_analyst_execution_plan(["market"], concurrency_limit=4).uses_parallel_execution
+        )
+        self.assertFalse(
+            build_analyst_execution_plan(["market", "news"], concurrency_limit=1).uses_parallel_execution
+        )
+        self.assertTrue(
+            build_analyst_execution_plan(["market", "news"], concurrency_limit=2).uses_parallel_execution
+        )
+
     def test_social_key_displays_as_sentiment_analyst(self):
         # The wire key stays "social" for saved-config back-compat, but the
         # user-visible agent_node label must match the v0.2.5 rename so the
@@ -44,6 +57,63 @@ class AnalystExecutionPlanTests(unittest.TestCase):
         self.assertEqual(spec.key, "social")
         self.assertEqual(spec.agent_node, "Sentiment Analyst")
         self.assertEqual(spec.report_key, "sentiment_report")
+
+
+class ParallelAnalystNodeTests(unittest.TestCase):
+    def test_runs_analysts_concurrently_and_merges_reports(self):
+        plan = build_analyst_execution_plan(["market", "news"], concurrency_limit=2)
+        barrier = Barrier(2)
+
+        def make_analyst(report_key, report_text):
+            def analyst(_state):
+                barrier.wait(timeout=1)
+                return {
+                    "messages": [FakeMessage(report_text)],
+                    report_key: report_text,
+                }
+
+            return analyst
+
+        node = create_parallel_analysts_node(
+            plan,
+            {
+                "market": make_analyst("market_report", "market done"),
+                "news": make_analyst("news_report", "news done"),
+            },
+            {
+                "market": FakeToolNode(),
+                "news": FakeToolNode(),
+            },
+        )
+
+        result = node({"messages": [FakeMessage("start")]})
+
+        self.assertEqual(result["market_report"], "market done")
+        self.assertEqual(result["news_report"], "news done")
+
+    def test_keeps_tool_loop_isolated_per_analyst(self):
+        plan = build_analyst_execution_plan(["market"], concurrency_limit=2)
+        calls = {"analyst": 0, "tool": 0}
+
+        def analyst(state):
+            calls["analyst"] += 1
+            if calls["analyst"] == 1:
+                return {"messages": [FakeMessage("need tool", tool_calls=[{"id": "call-1"}])]}
+            return {
+                "messages": [FakeMessage("final")],
+                "market_report": "saw " + state["messages"][-1].content,
+            }
+
+        node = create_parallel_analysts_node(
+            plan,
+            {"market": analyst},
+            {"market": FakeToolNode(calls)},
+        )
+
+        result = node({"messages": [FakeMessage("start")]})
+
+        self.assertEqual(result["market_report"], "saw tool result")
+        self.assertEqual(calls, {"analyst": 2, "tool": 1})
 
 
 class AnalystWallTimeTrackerTests(unittest.TestCase):
@@ -93,3 +163,19 @@ class AnalystWallTimeTrackerTests(unittest.TestCase):
             tracker.get_wall_times(),
             {"market": 3.0, "news": 5.0},
         )
+
+
+class FakeMessage:
+    def __init__(self, content, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class FakeToolNode:
+    def __init__(self, calls=None):
+        self.calls = calls
+
+    def invoke(self, _state):
+        if self.calls is not None:
+            self.calls["tool"] += 1
+        return {"messages": [FakeMessage("tool result")]}
